@@ -15,7 +15,11 @@ from kpi_engine import (
 )
 
 app = FastAPI(title="Crypto KPI Dashboard – SOL/USDC (Heroku)")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ✅ monta /static solo se esiste
+if os.path.isdir("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
 templates = Jinja2Templates(directory="templates")
 
 def fmt(x: float) -> str:
@@ -33,7 +37,6 @@ def fmt_duration(mins: float | int) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # default: ultimi 4 mesi
     end = datetime.utcnow()
     start = end - timedelta(days=120)
     return templates.TemplateResponse("index.html", {
@@ -59,7 +62,6 @@ async def calc(request: Request,
     error: Optional[str] = None
     result = None; inventory = None; live_price = None
 
-    # keys da env (Heroku Config Vars)
     api_key = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
     if not api_key or not api_secret:

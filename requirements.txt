@@ -5,3 +5,4 @@ numpy
 python-dateutil
 requests
 jinja2
+python-multipart

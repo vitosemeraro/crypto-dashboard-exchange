@@ -12,6 +12,17 @@
     .muted { color:#666; font-size:.9rem; }
     .table thead th { position: sticky; top:0; background:#fff; }
   </style>
+  <script>
+    function setLast6Months() {
+      const today = new Date();
+      const past = new Date();
+      past.setMonth(today.getMonth() - 6);
+
+      const format = (d) => d.toISOString().split('T')[0];
+      document.querySelector('input[name="start_date"]').value = format(past);
+      document.querySelector('input[name="end_date"]').value = format(today);
+    }
+  </script>
 </head>
 <body>
   <h2>📈 Crypto KPI Dashboard – {{ pair }}</h2>
@@ -38,7 +49,8 @@
       <input type="number" step="0.01" class="form-control" name="res_target" value="220">
     </div>
     <div class="col-auto align-self-end">
-      <button class="btn btn-primary">Calcola KPI</button>
+      <button type="submit" class="btn btn-primary">Calcola KPI</button>
+      <button type="button" onclick="setLast6Months()" class="btn btn-outline-secondary ms-2">Ultimi 6 mesi</button>
     </div>
   </form>
 

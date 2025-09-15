@@ -1,72 +1,112 @@
-from fastapi import FastAPI, Request
+import os
+from datetime import datetime, timedelta
+from typing import Optional
+
+import pandas as pd
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-import uvicorn
-import os
-import json
 
-from kpi_engine import fetch_trades_in_chunks, compute_kpis
+from kpi_engine import (
+    PAIR_DEFAULT, HUMAN_PAIR, validate_symbol_exists,
+    fetch_trades, df_from_trades, fifo_trades_per_match,
+    compute_kpis, fetch_price_binance, fetch_price_coingecko
+)
 
-load_dotenv()
+app = FastAPI(title="Crypto KPI Dashboard – SOL/USDC")
 
-app = FastAPI()
-
-# Mount solo se cartella esiste
+# Monta la cartella static solo se esiste
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
-if os.path.isdir("templates"):
-    templates = Jinja2Templates(directory="templates")
-else:
-    templates = None
+
+templates = Jinja2Templates(directory="templates")
+
+def fmt(x: float) -> str:
+    return f"{x:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+
+def fmt_duration(mins: float | int) -> str:
+    if mins is None:
+        return "-"
+    mins = float(mins)
+    if mins < 60: return f"~{fmt(mins)} min"
+    hours = mins/60
+    if hours < 24: return f"~{fmt(hours)} h"
+    days = hours/24
+    return f"~{fmt(days)} giorni"
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    end = datetime.utcnow()
+    start = end - timedelta(days=180)  # Default: ultimi 6 mesi
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "pair": HUMAN_PAIR,
+        "start": start.strftime("%Y-%m-%d"),
+        "end": end.strftime("%Y-%m-%d"),
+        "result": None,
+        "inventory": None,
+        "live_price": None,
+        "error": None,
+        "fmt": fmt,
+        "fmt_duration": fmt_duration
+    })
 
-@app.post("/calculate")
-async def calculate(request: Request):
-    data = await request.form()
-    pair = data.get("pair", "SOLUSDC").upper()
-    start_str = data.get("start_date")
-    end_str = data.get("end_date")
+@app.post("/calc", response_class=HTMLResponse)
+async def calc(request: Request,
+               start_date: str = Form(...),
+               end_date: str = Form(...),
+               res_qty: float = Form(15.0),
+               res_avg: float = Form(201.0),
+               res_target: float = Form(220.0)):
+    error: Optional[str] = None
+    result = None; inventory = None; live_price = None
 
-    api_key = data.get("api_key")
-    api_secret = data.get("api_secret")
+    api_key = os.getenv("BINANCE_API_KEY", "")
+    api_secret = os.getenv("BINANCE_API_SECRET", "")
+    if not api_key or not api_secret:
+        error = "Chiavi Binance mancanti. Imposta BINANCE_API_KEY e BINANCE_API_SECRET su Heroku."
+        return templates.TemplateResponse("index.html", {
+            "request": request, "pair": HUMAN_PAIR, "start": start_date, "end": end_date,
+            "result": None, "inventory": None, "live_price": None, "error": error,
+            "fmt": fmt, "fmt_duration": fmt_duration
+        })
 
     try:
-        start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M")
-        end_dt = datetime.strptime(end_str, "%Y-%m-%dT%H:%M")
+        validate_symbol_exists(PAIR_DEFAULT)
     except Exception as e:
-        return {"error": f"Formato data non valido: {e}"}
+        error = str(e)
 
-    # Step 1: scarica i trade da Binance (in chunk)
     try:
-        trades = fetch_trades_in_chunks(
-            api_key=api_key,
-            api_secret=api_secret,
-            symbol=pair,
-            start_time=start_dt,
-            end_time=end_dt,
-            chunk_hours=48  # ogni chiamata copre 2 giorni
-        )
-    except Exception as e:
-        return {"error": f"Errore fetch trades: {e}"}
+        start_ms = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+        end_ms   = int((datetime.strptime(end_date, "%Y-%m-%d") + timedelta(hours=23, minutes=59, seconds=59)).timestamp() * 1000)
+    except Exception:
+        error = "Formato data non valido. Usa YYYY-MM-DD."
 
-    # Step 2: calcolo KPI
-    try:
-        kpis = compute_kpis(trades)
-        return {"success": True, "data": kpis}
-    except Exception as e:
-        return {"error": f"Errore calcolo KPI: {e}"}
-@app.get("/")
-async def serve_index():
-    return FileResponse("index.html")
+    if not error:
+        try:
+            trades_raw = fetch_trades(api_key, api_secret, PAIR_DEFAULT, start_ms, end_ms)
+        except Exception as e:
+            msg = str(e)
+            if "451" in msg or "restricted location" in msg.lower():
+                error = ("Binance ha bloccato le API dal datacenter (451: restricted location). "
+                         "Scegli regione **EU** per l'app Heroku e riprova. In alternativa usa un altro host consentito.")
+            else:
+                error = f"Errore fetch trade: {msg}"
 
+    if not error:
+        if not trades_raw:
+            error = "Nessun trade trovato nell'intervallo."
+        else:
+            orders = df_from_trades(trades_raw, HUMAN_PAIR)
+            trades, meta, inventory = fifo_trades_per_match(orders, HUMAN_PAIR)
+            residual_cfg = {"qty": res_qty, "avgCost": res_avg, "targetPrice": res_target}
+            result = compute_kpis(trades, meta, residual_cfg)
+            live_price = fetch_price_binance(PAIR_DEFAULT) or fetch_price_coingecko()
 
-# --------- CLI helper for local testing ---------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=7860, reload=True)
+    return templates.TemplateResponse("index.html", {
+        "request": request, "pair": HUMAN_PAIR,
+        "start": start_date, "end": end_date,
+        "result": result, "inventory": inventory, "live_price": live_price,
+        "error": error, "fmt": fmt, "fmt_duration": fmt_duration
+    })

@@ -35,7 +35,16 @@
       <input type="date" class="form-control" name="end_date" value="{{ end }}" required>
     </div>
     <div class="col-auto align-self-end">
-      <button type="button" class="btn btn-outline-secondary" onclick="setSixMonthsRange()">Ultimi 6 mesi</button>
+      <button type="button" class="btn btn-outline-secondary" onclick="setSixMonthsRange()"><div class="col-auto align-self-end">
+  <button type="button" class="btn btn-outline-secondary btn-sm" onclick="
+    const end = new Date();
+    const start = new Date(end);
+    start.setMonth(end.getMonth() - 6);
+    document.querySelector('input[name=start_date]').value = start.toISOString().split('T')[0];
+    document.querySelector('input[name=end_date]').value = end.toISOString().split('T')[0];
+  ">Ultimi 6 mesi</button>
+</div>
+ 6 mesi</button>
     </div>
     <div class="w-100"></div>
     <div class="col-auto">

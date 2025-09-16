@@ -61,55 +61,67 @@ def validate_symbol_exists(symbol: str):
 def fetch_trades(api_key: str, api_secret: str, symbol: str, start_ms: int, end_ms: int) -> List[Dict[str, Any]]:
     """
     Scarica i fill via /api/v3/myTrades rispettando il limite Binance:
-    - finestra massima 24 ore quando si usano startTime/endTime
-    - se la finestra ritorna 1000 elementi, continua con fromId finché esaurisce
+    - Dividi in chunk da 3 giorni (massimo)
+    - Se il chunk restituisce esattamente 1000 risultati, continua con fromId
+    - Attende 1 secondo tra i chunk per evitare rate limit
     """
+    CHUNK_MS = 3 * 24 * 60 * 60 * 1000 - 1  # 3 giorni
     server_ms = get_server_time_ms()
     local_ms = int(time.time() * 1000)
     ts_offset = server_ms - local_ms
 
-    all_trades: List[Dict[str, Any]] = []
+    all_trades = []
     cursor_ms = start_ms
-    ONE_DAY = 24 * 60 * 60 * 1000 - 1  # 24h - 1ms
 
     last_id_seen = None
-
     while cursor_ms <= end_ms:
-        window_end_ms = min(cursor_ms + ONE_DAY, end_ms)
-
-        # prima pagina per finestra da 24h
+        window_end_ms = min(cursor_ms + CHUNK_MS, end_ms)
         base_params = {
             "symbol": symbol,
             "limit": 1000,
             "startTime": int(cursor_ms),
             "endTime": int(window_end_ms),
         }
-        chunk = binance_signed_get("/api/v3/myTrades", base_params, api_key, api_secret, ts_offset)
+
+        try:
+            chunk = binance_signed_get("/api/v3/myTrades", base_params, api_key, api_secret, ts_offset)
+        except Exception as e:
+            print(f"❌ Errore su chunk {cursor_ms} → {window_end_ms}: {e}")
+            raise
+
         if not isinstance(chunk, list):
             chunk = []
+
         all_trades.extend(chunk)
 
-        # se 1000 risultati, continua con fromId
+        # continua da fromId se 1000 risultati
         while len(chunk) == 1000:
             last_id = chunk[-1]["id"]
             if last_id == last_id_seen:
                 break
             last_id_seen = last_id
 
-            chunk = binance_signed_get(
-                "/api/v3/myTrades",
-                {"symbol": symbol, "limit": 1000, "fromId": last_id + 1},
-                api_key, api_secret, ts_offset
-            )
+            try:
+                chunk = binance_signed_get(
+                    "/api/v3/myTrades",
+                    {"symbol": symbol, "limit": 1000, "fromId": last_id + 1},
+                    api_key, api_secret, ts_offset
+                )
+            except Exception as e:
+                print(f"❌ Errore da fromId {last_id+1}: {e}")
+                break
+
             if not isinstance(chunk, list) or not chunk:
                 break
             all_trades.extend(chunk)
 
         cursor_ms = window_end_ms + 1
+        time.sleep(1.0)  # prevenzione rate limit
 
     all_trades.sort(key=lambda x: x["time"])
     all_trades = [t for t in all_trades if start_ms <= int(t["time"]) <= end_ms]
     return all_trades
+
 
 def fetch_price_binance(symbol: str) -> Optional[float]:
     try:
